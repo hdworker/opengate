@@ -63,6 +63,7 @@ def init_project(target: Path, project_name: str, *, force: bool = False) -> lis
     files = {
         module_name: render_adapter(module_name, project_name),
         ".env.opengate.example": "OPENGATE_URL=http://127.0.0.1:4096\nPROJECT_INTERNAL_API_URL=http://127.0.0.1:8000\n",
+        "requirements.opengate.txt": "opengate-mcp[mcp]\n",
         "mcp-config.example.json": json.dumps(
             {
                 "mcpServers": {

@@ -29,6 +29,10 @@ opengate prompt "Return JSON with three facts" --task fast-extraction
 opengate init C:\Code\new-project --name "New Project"
 ```
 
+The generated `requirements.opengate.txt` is intentionally separate from a
+project's domain dependencies, so an installer or deployment pipeline can
+upgrade this integration independently.
+
 The live model catalog is queried before selecting a task preset. No hosted
 OpenAI fallback is performed by this package.
 
