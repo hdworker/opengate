@@ -18,3 +18,6 @@ package and runs its adapter against a mocked loopback API. Only then is the
 old OpenGate subprocess code removed. This avoids coupling a project release
 to a new package release and keeps rollback possible.
 
+Efir currently exposes the first migration switch as `OPENGATE_USE_PACKAGE=1`.
+It routes observation batches, synthesis and operation planning through the
+new client while retaining the old scripts when the switch is `0`.
