@@ -64,6 +64,11 @@ def init_project(target: Path, project_name: str, *, force: bool = False) -> lis
         )
         + "\n",
     }
+    paths = [target / name for name in files]
+    if not force:
+        existing = [path for path in paths if path.exists()]
+        if existing:
+            raise FileExistsError(f"Refusing to overwrite {existing[0]}; pass force=True to replace it")
     written: list[Path] = []
     for name, content in files.items():
         path = target / name

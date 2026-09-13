@@ -6,6 +6,7 @@ import asyncio
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 import json
+from urllib.parse import urlparse
 
 
 class ProjectAdapter(Protocol):
@@ -19,6 +20,10 @@ class ProjectAdapter(Protocol):
 class LoopbackAPI:
     base_url: str = "http://127.0.0.1:8000"
     timeout: float = 30
+
+    def __post_init__(self) -> None:
+        if urlparse(self.base_url).hostname not in {"127.0.0.1", "localhost", "::1"}:
+            raise ValueError("Project MCP API must use a loopback URL")
 
     def call(self, method: str, path: str, body: dict[str, Any] | None = None, params: dict[str, Any] | None = None) -> Any:
         url = self.base_url.rstrip("/") + path

@@ -30,7 +30,10 @@ def run_jsonl(
             futures = {pool.submit(process, record): index for index, record in pending}
             for future in as_completed(futures):
                 index = futures[future]
-                existing[index] = {"index": index, **future.result()}
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    result = {"ok": False, "error": {"kind": "invalid_input", "message": str(exc)}}
+                existing[index] = {"index": index, **result}
                 output_path.write_text("\n".join(json.dumps(existing[i], ensure_ascii=False) for i in sorted(existing)) + "\n", encoding="utf-8")
     return len(existing)
-

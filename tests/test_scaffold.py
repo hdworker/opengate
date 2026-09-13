@@ -15,7 +15,8 @@ def test_scaffold_creates_mcp_adapter_and_config(tmp_path):
 
 def test_scaffold_does_not_overwrite_by_default(tmp_path):
     (tmp_path / "project_mcp.py").write_text("keep", encoding="utf-8")
+    (tmp_path / ".env.opengate.example").unlink(missing_ok=True)
     with pytest.raises(FileExistsError):
         init_project(tmp_path, "Demo Project")
     assert (tmp_path / "project_mcp.py").read_text(encoding="utf-8") == "keep"
-
+    assert not (tmp_path / ".env.opengate.example").exists()

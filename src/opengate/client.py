@@ -9,6 +9,7 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from .catalog import ModelInfo, choose_models, parse_catalog
 from .errors import GatewayError, classify_error
@@ -28,6 +29,9 @@ class OpenGateClient:
 
     def __init__(self, base_url: str = "http://127.0.0.1:4096", *, username: str = "", password: str = "") -> None:
         self.base_url = base_url.rstrip("/")
+        hostname = urlparse(self.base_url).hostname
+        if hostname not in {"127.0.0.1", "localhost", "::1"}:
+            raise ValueError("OpenGate must use a loopback URL")
         self.username = username
         self.password = password
 

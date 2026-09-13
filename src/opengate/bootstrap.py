@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import ipaddress
 import os
 import shutil
 import subprocess
@@ -9,8 +10,20 @@ import urllib.request
 from typing import Any
 
 
+def _assert_loopback(hostname: str) -> None:
+    if hostname in {"localhost", "ip6-localhost"}:
+        return
+    try:
+        if ipaddress.ip_address(hostname).is_loopback:
+            return
+    except ValueError:
+        pass
+    raise ValueError("OpenGate must bind to a loopback hostname")
+
+
 def ensure_server(hostname: str = "127.0.0.1", port: int = 4096, timeout: float = 20, *, no_start: bool = False) -> dict[str, Any]:
     """Probe or start OpenCode Serve without exposing it beyond loopback."""
+    _assert_loopback(hostname)
     url = f"http://{hostname}:{port}"
 
     def probe() -> bool:
@@ -40,4 +53,3 @@ def ensure_server(hostname: str = "127.0.0.1", port: int = 4096, timeout: float 
             return {"status": "started" if started else "already_running", "url": url, "health": "ok"}
         time.sleep(0.4)
     return {"status": "offline", "url": url, "error": "OpenCode Serve did not become ready"}
-
