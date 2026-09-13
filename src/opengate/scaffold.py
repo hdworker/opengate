@@ -19,12 +19,14 @@ class ProjectAdapter:
             return await api.acall("GET", "/api/internal/mcp/context")
 
         @mcp.tool()
-        async def project_create_task(instruction: str, idempotency_key: str) -> dict:
+        async def project_create_task(operation: str, instruction: str, parameters: dict, idempotency_key: str) -> dict:
             """Create a durable project task that may call OpenGate."""
             if not instruction.strip() or not idempotency_key.strip():
                 raise ValueError("instruction and idempotency_key are required")
             return await api.acall("POST", "/api/internal/mcp/tasks", {{
+                "operation": operation,
                 "instruction": instruction,
+                "parameters": parameters,
                 "idempotency_key": idempotency_key,
             }})
 
@@ -32,6 +34,18 @@ class ProjectAdapter:
         async def project_get_task(task_id: int) -> dict:
             """Read task status and progress."""
             return await api.acall("GET", f"/api/internal/mcp/tasks/{{task_id}}")
+
+        @mcp.tool()
+        async def project_get_task_result(task_id: int) -> dict:
+            """Read the validated result of a completed project task."""
+            return await api.acall("GET", f"/api/internal/mcp/tasks/{{task_id}}/result")
+
+        @mcp.tool()
+        async def project_cancel_task(task_id: int, idempotency_key: str) -> dict:
+            """Request cancellation of a queued or running project task."""
+            if not idempotency_key.strip():
+                raise ValueError("idempotency_key is required")
+            return await api.acall("POST", f"/api/internal/mcp/tasks/{{task_id}}/cancel", {{"idempotency_key": idempotency_key}})
 
 
 if __name__ == "__main__":
