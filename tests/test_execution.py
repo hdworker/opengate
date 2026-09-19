@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from opengate.catalog import FREE_MODEL_KEYS
 from opengate.errors import ErrorDiagnostic, ExecutionError, classify_error
 from opengate.execution import BatchItem, ExecutionRequest, ExecutionService, HealthRegistry, SessionHandle, _quota_expiry
+from opengate.structured import StructuredOutputError, parse_structured
 
 
 class FakeTransport:
@@ -199,4 +200,27 @@ def test_health_latency_is_ignored_until_third_sample():
         await registry.record_success("fast", ttft=1, total_latency=1)
         await registry.record_success("fast", ttft=1, total_latency=1)
         assert await registry.order(["slow", "fast"]) == ["fast", "slow"]
+    asyncio.run(run())
+
+
+def test_structured_output_validates_and_reports_path():
+    schema = {"type": "object", "required": ["items"], "properties": {"items": {"type": "array", "items": {"type": "string"}}}}
+    assert parse_structured('{"items":["one"]}', schema) == {"items": ["one"]}
+    try:
+        parse_structured('{"items":[1]}', schema)
+    except StructuredOutputError as exc:
+        assert "$.items[0]" in str(exc)
+    else:
+        raise AssertionError("invalid structured output was accepted")
+
+
+def test_keep_session_returns_handle_for_next_iteration():
+    async def run():
+        transport = FakeTransport()
+        service = ExecutionService(transport, backoff_base=0)
+        first = await service.execute(ExecutionRequest("first", model="opencode/big-pickle", billing_mode="strict-model", keep_session=True))
+        second = await service.execute(ExecutionRequest("second", model="opencode/big-pickle", billing_mode="strict-model", session_mode="continue", session=first.session, keep_session=True))
+        assert first.session.session_id == second.session.session_id == "s1"
+        assert transport.created == ["s1"]
+        assert transport.deleted == []
     asyncio.run(run())

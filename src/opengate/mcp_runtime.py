@@ -20,9 +20,12 @@ class ProjectAdapter(Protocol):
 class LoopbackAPI:
     base_url: str = "http://127.0.0.1:8000"
     timeout: float = 30
+    allow_remote: bool = False
+    bearer_token: str = ""
 
     def __post_init__(self) -> None:
-        if urlparse(self.base_url).hostname not in {"127.0.0.1", "localhost", "::1"}:
+        hostname = urlparse(self.base_url).hostname
+        if hostname not in {"127.0.0.1", "localhost", "::1"} and not (self.allow_remote and urlparse(self.base_url).scheme == "https"):
             raise ValueError("Project MCP API must use a loopback URL")
 
     def call(self, method: str, path: str, body: dict[str, Any] | None = None, params: dict[str, Any] | None = None, headers: dict[str, str] | None = None) -> Any:
@@ -32,7 +35,8 @@ class LoopbackAPI:
 
             url += "?" + urlencode({key: value for key, value in params.items() if value is not None})
         data = json.dumps(body, ensure_ascii=False).encode() if body is not None else None
-        request = Request(url, data=data, method=method, headers={"Accept": "application/json", "Content-Type": "application/json", **(headers or {})})
+        auth = {"Authorization": f"Bearer {self.bearer_token}"} if self.bearer_token else {}
+        request = Request(url, data=data, method=method, headers={"Accept": "application/json", "Content-Type": "application/json", **auth, **(headers or {})})
         try:
             with urlopen(request, timeout=self.timeout) as response:
                 return json.loads(response.read().decode("utf-8"))
@@ -47,12 +51,12 @@ class LoopbackAPI:
         return await asyncio.to_thread(self.call, method, path, body, params, headers)
 
 
-def create_mcp_server(adapter: ProjectAdapter, *, api_url: str = "http://127.0.0.1:8000") -> Any:
+def create_mcp_server(adapter: ProjectAdapter, *, api_url: str = "http://127.0.0.1:8000", allow_remote: bool = False, bearer_token: str = "") -> Any:
     """Create a FastMCP server and let the project register its domain tools."""
     try:
         from mcp.server.fastmcp import FastMCP
     except ImportError as exc:
         raise RuntimeError("Install opengate-mcp[mcp] to run the MCP server") from exc
     server = FastMCP(adapter.name, instructions=adapter.instructions)
-    adapter.register_tools(server, LoopbackAPI(api_url))
+    adapter.register_tools(server, LoopbackAPI(api_url, allow_remote=allow_remote, bearer_token=bearer_token))
     return server

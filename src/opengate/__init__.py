@@ -11,6 +11,7 @@ from .execution import (
     ItemResult,
     SessionHandle,
 )
+from .structured import StructuredOutputError, json_instruction, parse_structured, validate_structured
 from .transport import OpenCodeSdkTransport
 
 __all__ = [
@@ -26,4 +27,8 @@ __all__ = [
     "ItemResult",
     "OpenCodeSdkTransport",
     "SessionHandle",
+    "StructuredOutputError",
+    "json_instruction",
+    "parse_structured",
+    "validate_structured",
 ]

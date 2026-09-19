@@ -16,6 +16,7 @@ from .catalog import (
     snapshot_catalog,
 )
 from .errors import ErrorDiagnostic, ExecutionError, classify_error
+from .structured import StructuredOutputError, json_instruction, parse_structured
 from .transport import ExecutionTransport, OpenCodeSdkTransport
 
 
@@ -43,6 +44,8 @@ class ExecutionRequest:
     session_title: str = "OpenGate execution"
     agent: str = ""
     variant: str = ""
+    keep_session: bool = False
+    response_schema: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -70,6 +73,8 @@ class ExecutionResult:
     ttft: float | None
     total_latency: float
     catalog: CatalogSnapshot
+    structured: Any = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -299,17 +304,17 @@ class ExecutionService:
         self.health = HealthRegistry()
 
     @classmethod
-    def from_env(cls, *, concurrency: int = 2) -> "ExecutionService":
+    def from_env(cls, *, concurrency: int = 2, timeout: float | None = None, readiness_retries: int | None = None, readiness_backoff: float | None = None) -> "ExecutionService":
         import os
 
         return cls.from_config(
             base_url=os.getenv("OPENGATE_URL", "http://127.0.0.1:4096"),
-            timeout=float(os.getenv("OPENGATE_TIMEOUT_SECONDS", os.getenv("OPENGATE_TIMEOUT", "180"))),
+            timeout=float(timeout if timeout is not None else os.getenv("OPENGATE_TIMEOUT_SECONDS", os.getenv("OPENGATE_TIMEOUT", "180"))),
             username=os.getenv("OPENGATE_USERNAME", os.getenv("OPENCODE_USERNAME", "")),
             password=os.getenv("OPENGATE_PASSWORD", os.getenv("OPENCODE_PASSWORD", "")),
             concurrency=concurrency,
-            readiness_retries=int(os.getenv("OPENGATE_READINESS_RETRIES", "3")),
-            readiness_backoff=float(os.getenv("OPENGATE_READINESS_BACKOFF_SECONDS", "1")),
+            readiness_retries=int(readiness_retries if readiness_retries is not None else os.getenv("OPENGATE_READINESS_RETRIES", "3")),
+            readiness_backoff=float(readiness_backoff if readiness_backoff is not None else os.getenv("OPENGATE_READINESS_BACKOFF_SECONDS", "1")),
         )
 
     @classmethod
@@ -435,7 +440,7 @@ class ExecutionService:
                 started_at = datetime.now(timezone.utc)
                 started_clock = monotonic()
                 session_id = ""
-                keep_session = False
+                keep_session = request.keep_session or request.session_mode == "continue" or request.session is not None
                 try:
                     holder = {"session_id": request.session.session_id if request.session is not None and request.session_mode == "continue" and not attempts else ""}
 
@@ -447,7 +452,7 @@ class ExecutionService:
                             raise ExecutionError("OpenCode returned no session id", kind="invalid_response", diagnostic=ErrorDiagnostic(stage="session_create", message="missing session id", model=candidate, provider=provider))
                         await self.transport.chat(
                             holder["session_id"],
-                            prompt=item.prompt,
+                            prompt=(item.prompt + "\n\n" + json_instruction(request.response_schema)) if request.response_schema else item.prompt,
                             provider=provider,
                             model=model,
                             system=request.system,
@@ -468,15 +473,33 @@ class ExecutionService:
                         ) from exc
                     session_id = holder["session_id"]
                     text = _assistant_text(messages)
+                    structured = None
+                    if request.response_schema:
+                        try:
+                            structured = parse_structured(text, request.response_schema)
+                        except StructuredOutputError as exc:
+                            raise ExecutionError(
+                                str(exc),
+                                kind="invalid_response",
+                                diagnostic=ErrorDiagnostic(
+                                    stage="structured_output",
+                                    message=str(exc),
+                                    source_name="OpenGateStructuredOutput",
+                                    source_data={"path": exc.path, "schema": request.response_schema},
+                                    model=candidate,
+                                    provider=provider,
+                                ),
+                                session_id=session_id,
+                            ) from exc
                     total_latency = monotonic() - started_clock
                     ttft = total_latency
                     finished_at = datetime.now(timezone.utc)
                     attempt = Attempt(attempt_number, candidate, provider, session_id, "answer_poll", "succeeded", started_at, finished_at, ttft, total_latency)
                     attempts.append(attempt)
                     await self.health.record_success(candidate, ttft=ttft, total_latency=total_latency)
-                    keep_session = request.session_mode == "continue" or request.session is not None
                     handle = SessionHandle(session_id, request.directory, candidate) if keep_session else None
-                    return ItemResult(item.index, item.key, "succeeded", ExecutionResult(text, candidate, handle, tuple(attempts), ttft, total_latency, state.snapshot), attempts=tuple(attempts))
+                    metadata = {"session_id": session_id, "session_mode": request.session_mode, "session_title": request.session_title}
+                    return ItemResult(item.index, item.key, "succeeded", ExecutionResult(text, candidate, handle, tuple(attempts), ttft, total_latency, state.snapshot, structured, metadata), attempts=tuple(attempts))
                 except ExecutionError as exc:
                     session_id = exc.session_id or holder.get("session_id", session_id)
                     diagnostic = exc.diagnostic or ErrorDiagnostic(stage="execution", message=str(exc), model=candidate, provider=provider)

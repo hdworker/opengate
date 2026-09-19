@@ -104,7 +104,37 @@ asyncio.run(main())
 ~~~
 
 ExecutionResult содержит text, итоговую model, ordered attempts, ttft,
-total_latency, использованный catalog snapshot и optional session.
+total_latency, использованный catalog snapshot, optional session, metadata и
+parsed structured value, если consumer передал response_schema.
+
+### Последовательные смысловые итерации и строгий JSON
+
+Проект владеет контекстом предыдущей итерации, а OpenGate предоставляет
+транспортную сессию и проверку результата:
+
+~~~python
+from opengate import ExecutionRequest, ExecutionService, SessionHandle
+
+schema = {
+    "type": "object",
+    "required": ["assignments"],
+    "properties": {"assignments": {"type": "array"}},
+}
+
+async with ExecutionService.from_env() as service:
+    first = await service.execute(ExecutionRequest(
+        prompt="Разметь первый batch.", response_schema=schema, keep_session=True,
+    ))
+    second = await service.execute(ExecutionRequest(
+        prompt="Продолжи по следующему batch и сохрани смысл предыдущей итерации.",
+        response_schema=schema, session_mode="continue", session=first.session,
+        keep_session=True,
+    ))
+~~~
+
+При нарушении JSON-контракта возникает `ExecutionError(kind="invalid_response")`.
+В `diagnostic.source_data` сохраняются путь ошибки и схема, но не credentials.
+OpenGate не интерпретирует поля схемы и не знает доменную семантику групп.
 
 ## Политика моделей
 
@@ -280,7 +310,19 @@ if __name__ == "__main__":
     create_mcp_server(ProjectAdapter()).run("stdio")
 ~~~
 
-Ответственность разделена так:
+Для удалённого read-only MCP проект может явно включить HTTPS и bearer token:
+
+~~~python
+create_mcp_server(
+    ProjectAdapter(),
+    api_url="https://efir.example/internal",
+    allow_remote=True,
+    bearer_token="...",
+)
+~~~
+
+`allow_remote=True` принимает только HTTPS; по умолчанию сохраняется loopback-only
+режим. Ответственность разделена так:
 
 - проект — prompts, source data, domain operations, validation и durable task;
 - ExecutionService — catalog, candidate plan, sessions, retries и diagnostics;
