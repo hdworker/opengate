@@ -4,11 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "opengate-mcp"
-version = "0.1.0"
+version = "0.3.0"
 description = "Reusable local OpenGate provider client and project MCP runtime"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+    "opencode-ai==0.1.0a36",
+]
 
 [project.optional-dependencies]
 mcp = ["mcp>=1.27,<2"]

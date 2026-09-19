@@ -1,7 +1,29 @@
-"""Reusable local OpenGate and project-MCP components."""
+"""Reusable local OpenGate execution and project-MCP components."""
 
-from .client import GatewayResult, OpenGateClient
-from .errors import GatewayError
+from .errors import ErrorDiagnostic, ExecutionError, GatewayError
+from .execution import (
+    Attempt,
+    BatchItem,
+    ExecutionRequest,
+    ExecutionResult,
+    ExecutionService,
+    HealthRegistry,
+    ItemResult,
+    SessionHandle,
+)
+from .transport import OpenCodeSdkTransport
 
-__all__ = ["GatewayError", "GatewayResult", "OpenGateClient"]
-
+__all__ = [
+    "Attempt",
+    "BatchItem",
+    "ErrorDiagnostic",
+    "ExecutionError",
+    "ExecutionRequest",
+    "ExecutionResult",
+    "ExecutionService",
+    "GatewayError",
+    "HealthRegistry",
+    "ItemResult",
+    "OpenCodeSdkTransport",
+    "SessionHandle",
+]
