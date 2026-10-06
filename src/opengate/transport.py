@@ -8,11 +8,16 @@ from urllib.parse import urlparse
 import httpx
 from opencode_ai import AsyncOpencode
 
-from .catalog import snapshot_catalog
-from .errors import ErrorDiagnostic, ExecutionError, classify_error
+from .errors import ErrorDiagnostic, ExecutionError, classify_error, sanitize_diagnostic
 
 
 class ExecutionTransport(Protocol):
+    """Transport seam whose adapters translate external failures to ExecutionError.
+
+    Raw exceptions escaping an adapter call indicate an implementation failure;
+    callers must not classify them as transient gateway failures.
+    """
+
     async def providers(self, *, directory: str = "") -> Any: ...
 
     async def health(self) -> dict[str, Any]: ...
@@ -46,23 +51,8 @@ class TransportConfig:
 
 
 def _bounded(value: Any, limit: int = 2_000) -> Any:
-    """Keep provider evidence useful without retaining prompts or secrets."""
-    if isinstance(value, dict):
-        result: dict[str, Any] = {}
-        for key, item in value.items():
-            key_text = str(key)
-            if any(marker in key_text.casefold() for marker in ("password", "secret", "token", "api_key", "authorization", "credential")):
-                result[key_text] = "[redacted]"
-            else:
-                result[key_text] = _bounded(item, limit)
-        return result
-    if isinstance(value, (list, tuple)):
-        return [_bounded(item, limit) for item in value[:20]]
-    if isinstance(value, str):
-        return value[:limit]
-    if value is None or isinstance(value, (bool, int, float)):
-        return value
-    return str(value)[:limit]
+    """Backward-compatible alias for the shared diagnostic sanitizer."""
+    return sanitize_diagnostic(value, max_string=limit)
 
 
 class OpenCodeSdkTransport:
@@ -102,7 +92,7 @@ class OpenCodeSdkTransport:
     def _query(directory: str) -> dict[str, str]:
         return {"directory": directory} if directory else {}
 
-    def _failure(self, exc: Exception, *, stage: str, model: str = "") -> ExecutionError:
+    def _failure(self, exc: Exception, *, stage: str, model: str = "", sensitive_values: tuple[str, ...] = ()) -> ExecutionError:
         status = getattr(exc, "status_code", None)
         response = getattr(exc, "response", None)
         body = getattr(exc, "body", None)
@@ -116,12 +106,13 @@ class OpenCodeSdkTransport:
             message = str(body.get("message") or body.get("error") or message)
         elif isinstance(body, str) and body:
             message = body[:2_000]
+        message = sanitize_diagnostic(message, sensitive_values=sensitive_values)
         diagnostic = ErrorDiagnostic(
             stage=stage,
             message=message[:2_000],
             status=int(status) if isinstance(status, int) else None,
             source_name=exc.__class__.__name__,
-            source_data=_bounded(body if body is not None else {"message": message}),
+            source_data=sanitize_diagnostic(body if body is not None else {"message": message}, sensitive_values=sensitive_values),
             model=model,
         )
         return ExecutionError(message, kind=classify_error(diagnostic.status, message, source_name=diagnostic.source_name), diagnostic=diagnostic)
@@ -183,7 +174,7 @@ class OpenCodeSdkTransport:
                 timeout=self.config.timeout,
             )
         except Exception as exc:
-            raise self._failure(exc, stage="message_submit", model=f"{provider}/{model}") from exc
+            raise self._failure(exc, stage="message_submit", model=f"{provider}/{model}", sensitive_values=(prompt, system)) from exc
 
     async def messages(self, session_id: str, *, directory: str = "") -> Any:
         try:
@@ -203,9 +194,6 @@ class OpenCodeSdkTransport:
 
     async def close(self) -> None:
         await self.client.close()
-
-    async def catalog_snapshot(self, *, directory: str = ""):
-        return snapshot_catalog(await self.providers(directory=directory))
 
     async def __aenter__(self) -> "OpenCodeSdkTransport":
         return self

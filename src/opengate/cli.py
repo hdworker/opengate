@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
@@ -14,7 +15,6 @@ from .errors import ExecutionError
 from .execution import BatchItem, ExecutionRequest, ExecutionService
 from .jsonl import read_jsonl, write_jsonl_item
 from .scaffold import init_project
-from .transport import OpenCodeSdkTransport
 
 
 def _json_value(value: Any) -> Any:
@@ -38,7 +38,16 @@ def _json_value(value: Any) -> Any:
 
 
 def _service(url: str | None, *, concurrency: int = 2) -> ExecutionService:
-    return ExecutionService(OpenCodeSdkTransport(url or "http://127.0.0.1:4096"), concurrency=concurrency)
+    return ExecutionService.from_env(base_url=url, concurrency=concurrency)
+
+
+def _same_file_path(left: Path, right: Path) -> bool:
+    try:
+        if left.samefile(right):
+            return True
+    except OSError:
+        pass
+    return os.path.normcase(str(left.resolve())) == os.path.normcase(str(right.resolve()))
 
 
 async def _run_async(args: argparse.Namespace) -> Any:
@@ -58,14 +67,17 @@ async def _run_async(args: argparse.Namespace) -> Any:
         finally:
             await service.close()
     if args.command == "batch":
+        input_path = Path(args.input)
+        output_path = Path(args.output)
+        if _same_file_path(input_path, output_path):
+            raise ValueError("batch input and output must refer to different files")
         service = _service(args.url, concurrency=args.workers)
         try:
             request = ExecutionRequest("", task=args.task or "", model=args.model, billing_mode=args.billing_mode, timeout=args.timeout)
             items = (
                 BatchItem(index, args.template.format_map({**record, "value": record.get(args.field, "")}), str(record.get("key", "")))
-                for index, record in enumerate(read_jsonl(Path(args.input)))
+                for index, record in enumerate(read_jsonl(input_path))
             )
-            output_path = Path(args.output)
             output_path.parent.mkdir(parents=True, exist_ok=True)
             count = 0
             with output_path.open("w", encoding="utf-8") as handle:
@@ -80,6 +92,8 @@ async def _run_async(args: argparse.Namespace) -> Any:
                     }
                     write_jsonl_item(handle, _json_value(value))
                     count += 1
+                    if count % 100 == 0:
+                        handle.flush()
             return {"processed": count}
         finally:
             await service.close()

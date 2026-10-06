@@ -70,6 +70,8 @@ def test_error_classification_uses_status_and_text():
     assert classify_error(402, "payment required") == "request_rejected"
     assert classify_error(402, "free quota exhausted") == "quota_exhausted"
     assert classify_error(429, "too many requests") == "rate_limited"
+    assert classify_error(403, 'Forbidden: {"model":"mimo-v2.5"}') == "model_unavailable"
+    assert classify_error(None, 'Forbidden: {"model":"mimo-v2.5"}') == "model_unavailable"
 
 
 def test_quota_registry_expires():

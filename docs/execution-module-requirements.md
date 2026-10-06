@@ -22,6 +22,11 @@ text, final model, optional `SessionHandle`, ordered Attempts, TTFT, total
 latency and the immutable catalog snapshot. `ItemResult` distinguishes
 `succeeded`, `failed` and `not_started`.
 
+Structured output supports the keywords `type`, `enum`, `required`,
+`properties`, `items`, and `additionalProperties`, including boolean
+subschemas. `enum` comparison follows JSON types: `true` differs from `1`,
+while numeric `1` and `1.0` compare equal.
+
 The Python API is the primary interface. The CLI is a thin async wrapper; MCP
 remains a project integration layer and is not the execution API.
 
@@ -41,8 +46,17 @@ never retained.
 
 Presets filter by context, reasoning and attachment capability and define the
 primary order. Candidate plans are partitioned into eligible free candidates
-followed by eligible paid candidates. Runtime speed can reorder only models in
-the same preset priority group and only after three successful observations.
+followed by eligible paid candidates; health and latency ordering never moves
+a paid candidate ahead of a free one. Within that billing order, preset
+priority remains primary, transport health is preferred within a priority
+group, and runtime speed can reorder candidates only within that group and
+only after three successful observations. Ties retain their input order.
+`health_snapshot()` exposes `transport_healthy` as endpoint reachability, not
+model eligibility: a successful invocation or HTTP status 100–499 means
+reachable; HTTP status 500 or higher and a status-less transport invocation
+failure mean unhealthy. A status-less local validation or model-response error
+preserves the previous health signal because it does not establish transport
+failure.
 
 The six known free identities are:
 
@@ -64,15 +78,26 @@ the policy explicitly; incidental prompt text is not parsed as a billing rule.
 ## Diagnostics and retry policy
 
 Normalized error kinds are `quota_exhausted`, `rate_limited`,
-`model_unavailable`, `gateway_unavailable`, `request_rejected`,
-`invalid_response` and `invalid_input`. Classification uses SDK/OpenCode
-status, error name, structured data and source message.
+`model_unavailable`, `gateway_unavailable`, `plan_exhausted`, `internal_error`,
+`request_rejected`, `invalid_response` and `invalid_input`. Classification uses
+SDK/OpenCode status, error name, structured data and source message. A
+`plan_exhausted` result means the Run has no usable candidate left; it is not a
+provider quota report.
+
+Planning failures stay within the typed `ExecutionError` API: an unknown task
+preset is `invalid_input`, an empty eligible candidate pool is
+`model_unavailable`, and malformed catalog/planner data is `invalid_response`.
 
 - Quota exhaustion moves to the next candidate and records a parsed quota TTL;
   without a usable date the block lasts only for the current Run.
 - Model unavailable moves immediately to the next candidate.
 - Rate limiting uses one bounded backoff before the next candidate.
-- Gateway/timeout failures retry the same model up to two times.
+- `ExecutionTransport` adapters must translate external/backend failures into
+  typed `ExecutionError` values. Only an adapter-raised
+  `ExecutionError(kind="gateway_unavailable")` during invocation and an
+  ExecutionService timeout retry the same model up to two times. An unexpected
+  raw adapter exception is an `internal_error` and is neither retried nor
+  routed to another model.
 - Rejected requests, invalid responses and invalid input are not retried or
   switched automatically.
 - Every retry and model switch creates a new Attempt.
@@ -80,15 +105,20 @@ status, error name, structured data and source message.
 The SDK is created with `max_retries=0`; all routing retries are visible to the
 Execution Module. When the full free-plus-paid plan has no remaining candidate,
 the Run stops scheduling new Items. Active Items finish within their existing
-timeout; queued Items receive `not_started`.
+timeout; queued Items receive `outcome="not_started"` with
+`kind="plan_exhausted"`.
 
 ## Batch and persistence boundary
 
-Batch execution uses async tasks and an `asyncio.Semaphore`, default
-concurrency 2. Results are yielded as they complete. Input JSONL is immutable;
+Batch execution consumes input lazily and keeps at most the configured number
+of item tasks in flight, default concurrency 2. Results are yielded as they
+complete. Input JSONL is immutable;
 the old behavior of reading an output file and silently skipping indexes is
-removed. There is no SQL store, checkpoint, cross-run resume, cancellation or
-mini-web UI in v1. A consumer may persist and explicitly reprocess selected
+removed. There is no SQL store, checkpoint, cross-run resume or mini-web UI in
+v1. If a consumer closes or cancels the async iterator, unfinished local worker
+tasks are cancelled, including active calls. Plan exhaustion is different: it
+stops scheduling new Items but allows active Attempts to finish within their
+existing timeout. A consumer may persist and explicitly reprocess selected
 Items in a later Run.
 
 ## Verification

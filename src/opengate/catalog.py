@@ -2,10 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import math
 from typing import Any, Iterable, Literal
+
+from ._values import dump_sdk_value
 
 
 BillingMode = Literal["free-first", "free-only", "paid-only", "strict-model"]
+BILLING_MODES: tuple[str, ...] = ("free-first", "free-only", "paid-only", "strict-model")
 
 FREE_MODEL_KEYS: tuple[str, ...] = (
     "opencode/big-pickle",
@@ -79,6 +83,14 @@ class CandidatePlan:
         return self.free + self.paid
 
 
+class NoCandidatePlanError(RuntimeError):
+    """The catalog contains no model allowed by the requested plan."""
+
+
+class CatalogParseError(ValueError):
+    """The provider catalog does not have the shape required for planning."""
+
+
 PRESETS: dict[str, Preset] = {
     "fast-extraction": Preset("fast-extraction", 128_000, prefer_low_cost=True),
     "bulk-classification": Preset("bulk-classification", 200_000, prefer_low_cost=True),
@@ -104,46 +116,85 @@ def _normalise_name(value: str) -> str:
     return "".join(char.casefold() for char in value if char.isalnum())
 
 
-def _as_dict(value: Any) -> Any:
-    if hasattr(value, "model_dump"):
-        return value.model_dump(by_alias=True)
-    return value
+def _catalog_mapping(value: Any, path: str, *, none_is_empty: bool = False) -> dict[str, Any]:
+    data = dump_sdk_value(value)
+    if data is None and none_is_empty:
+        return {}
+    if not isinstance(data, dict):
+        raise CatalogParseError(f"{path} must be an object")
+    return data
 
 
 def parse_catalog(payload: Any) -> list[ModelInfo]:
-    data = _as_dict(payload)
-    providers = data.get("providers", []) if isinstance(data, dict) else []
+    data = _catalog_mapping(payload, "catalog")
+    providers = data.get("providers")
+    if not isinstance(providers, list):
+        raise CatalogParseError("catalog.providers must be an array")
     result: list[ModelInfo] = []
-    for provider in providers:
-        provider = _as_dict(provider)
-        if not isinstance(provider, dict):
-            continue
-        provider_id = str(provider.get("id") or "")
-        models = provider.get("models") or {}
-        for model_id, raw_model in models.items() if isinstance(models, dict) else []:
-            model = _as_dict(raw_model)
-            if not isinstance(model, dict):
-                continue
-            nested_capabilities = _as_dict(model.get("capabilities") or {})
-            cost = _as_dict(model.get("cost") or {})
-            limit = _as_dict(model.get("limit") or {})
-            modalities = _as_dict(model.get("modalities") or {})
+    for provider_index, raw_provider in enumerate(providers):
+        provider_path = f"catalog.providers[{provider_index}]"
+        provider = _catalog_mapping(raw_provider, provider_path)
+        provider_id = provider.get("id")
+        if not isinstance(provider_id, str) or not provider_id:
+            raise CatalogParseError(f"{provider_path}.id must be a non-empty string")
+        models = provider.get("models")
+        if not isinstance(models, dict):
+            raise CatalogParseError(f"{provider_path}.models must be an object")
+        for model_id, raw_model in models.items():
+            model_path = f"{provider_path}.models.{model_id}"
+            if not isinstance(model_id, str) or not model_id:
+                raise CatalogParseError(f"{provider_path}.models keys must be non-empty strings")
+            model = _catalog_mapping(raw_model, model_path)
+            nested_capabilities = _catalog_mapping(model.get("capabilities"), f"{model_path}.capabilities", none_is_empty=True)
+            cost = _catalog_mapping(model.get("cost"), f"{model_path}.cost", none_is_empty=True)
+            limit = _catalog_mapping(model.get("limit"), f"{model_path}.limit", none_is_empty=True)
+            modalities = _catalog_mapping(model.get("modalities"), f"{model_path}.modalities", none_is_empty=True)
+            raw_input_modalities = modalities.get("input")
+            if raw_input_modalities is None:
+                input_modalities = []
+            elif isinstance(raw_input_modalities, (list, tuple)):
+                input_modalities = raw_input_modalities
+            else:
+                raise CatalogParseError(f"{model_path}.modalities.input must be an array")
+
+            raw_context = limit.get("context")
+            if raw_context is None:
+                context = 0
+            elif isinstance(raw_context, bool) or not isinstance(raw_context, (int, float)):
+                raise CatalogParseError(f"{model_path}.limit.context must be a non-negative integer")
+            elif isinstance(raw_context, int):
+                context = raw_context
+            elif math.isfinite(raw_context) and raw_context.is_integer():
+                context = int(raw_context)
+            else:
+                raise CatalogParseError(f"{model_path}.limit.context must be a non-negative integer")
+            if context < 0:
+                raise CatalogParseError(f"{model_path}.limit.context must be a non-negative integer")
+
+            for price_field in ("input", "output"):
+                if price_field not in cost:
+                    continue
+                price = cost[price_field]
+                if isinstance(price, bool) or not isinstance(price, (int, float)):
+                    raise CatalogParseError(f"{model_path}.cost.{price_field} must be a finite non-negative number")
+                if (isinstance(price, float) and not math.isfinite(price)) or price < 0:
+                    raise CatalogParseError(f"{model_path}.cost.{price_field} must be a finite non-negative number")
             capabilities = {
                 "reasoning": bool(model.get("reasoning") or nested_capabilities.get("reasoning")),
                 "attachment": bool(model.get("attachment") or nested_capabilities.get("attachment")),
-                "input": {"image": "image" in ((_as_dict(modalities).get("input") or []))},
+                "input": {"image": "image" in input_modalities},
             }
             status = str(model.get("status") or "active")
             if status == "deprecated":
                 continue
-            result.append(ModelInfo(f"{provider_id}/{model_id}", str(model.get("name") or model_id), int(limit.get("context") or 0), capabilities, cost if isinstance(cost, dict) else {}, status))
+            result.append(ModelInfo(f"{provider_id}/{model_id}", str(model.get("name") or model_id), context, capabilities, cost, status))
     return [item for item in result if item.status == "active"]
 
 
 def snapshot_catalog(payload: Any) -> CatalogSnapshot:
-    data = _as_dict(payload)
-    defaults = data.get("default") if isinstance(data, dict) else {}
-    return CatalogSnapshot(datetime.now(timezone.utc), tuple(parse_catalog(data)), dict(defaults or {}))
+    data = _catalog_mapping(payload, "catalog")
+    defaults = _catalog_mapping(data.get("default"), "catalog.default", none_is_empty=True)
+    return CatalogSnapshot(datetime.now(timezone.utc), tuple(parse_catalog(data)), defaults)
 
 
 def _eligible(model: ModelInfo, preset: Preset | None) -> bool:
@@ -164,11 +215,30 @@ def _sort_key(model: ModelInfo, preset: Preset | None, preferred: tuple[str, ...
     return preference, cost if preset and preset.prefer_low_cost else 0, -model.context, model.key
 
 
+def _explicit_model_is_free(snapshot: CatalogSnapshot, model: str) -> bool:
+    model_info = snapshot.by_key().get(model)
+    return model in FREE_MODEL_KEYS or (model_info is not None and model_info.is_free)
+
+
+def explicit_model_satisfies_billing_mode(snapshot: CatalogSnapshot, model: str, billing_mode: BillingMode) -> bool:
+    if billing_mode not in {"free-only", "paid-only"}:
+        return True
+    is_free = _explicit_model_is_free(snapshot, model)
+    if billing_mode == "free-only":
+        return is_free
+    model_info = snapshot.by_key().get(model)
+    return model_info is not None and not is_free
+
+
 def build_candidate_plan(snapshot: CatalogSnapshot, *, task: str = "", model: str = "", billing_mode: BillingMode = "free-first") -> CandidatePlan:
+    if billing_mode not in BILLING_MODES:
+        raise ValueError(f"Unknown billing mode: {billing_mode}")
     if model:
-        if billing_mode == "paid-only":
-            return CandidatePlan((), (model,))
-        return CandidatePlan((model,), ())
+        if not explicit_model_satisfies_billing_mode(snapshot, model, billing_mode):
+            raise ValueError(f"Model {model} does not satisfy {billing_mode} billing mode")
+        if _explicit_model_is_free(snapshot, model):
+            return CandidatePlan((model,), ())
+        return CandidatePlan((), (model,))
     preset = PRESETS.get(task) if task else None
     if task and preset is None:
         raise ValueError(f"Unknown OpenGate task preset: {task}")
@@ -190,7 +260,7 @@ def build_candidate_plan(snapshot: CatalogSnapshot, *, task: str = "", model: st
     elif billing_mode == "paid-only":
         free = []
     if not free and not paid:
-        raise RuntimeError(f"No active model satisfies preset {task}" if task else "No model candidates available")
+        raise NoCandidatePlanError(f"No active model satisfies preset {task}" if task else "No model candidates available")
     return CandidatePlan(tuple(free), tuple(paid))
 
 
